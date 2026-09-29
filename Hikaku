@@ -9,7 +9,11 @@ Option Explicit
 '   ピンク : 今年度で値が消えたセル
 '   濃い緑 : (キー列指定時) 今年度で追加された行
 '
-' ・元の2ファイルは変更しません（今年度ファイルの隣に「_差分_日時」付きで保存）
+' ・行の中にⅠ/Ⅱ/Ⅲのセル（区分）がある場合、その左側を「項目」とみなし、
+'   同じ項目の前年度の行と比較する
+'     今年度Ⅰ → 前年度Ⅱ、今年度Ⅱ → 前年度Ⅲ、今年度Ⅲ → 前年度Ⅲ
+'   前年度に対応する行がなければ通常の比較をする
+' ・元の2ファイルは変更しません（今年度ファイルと同じフォルダの「Hikaku」に保存）
 ' ・先頭に「差分一覧」シートを追加します
 '==========================================================
 
@@ -107,27 +111,32 @@ End Sub
 
 '---------- セル位置どうしで比較 ----------
 Private Sub CompareByPosition(wsO As Worksheet, wsN As Worksheet, lg As Collection)
-    Dim r As Long, c As Long, i As Long, j As Long
+    Dim r As Long, c As Long, i As Long, oRow As Long, lc As Long
     Dim a As Variant, b As Variant
+    Dim ld As Object
 
     r = MaxL(LastRow(wsO), LastRow(wsN))
     c = MaxL(MaxL(LastCol(wsO), LastCol(wsN)), 2)
     a = GetArr(wsO, r, c)
     b = GetArr(wsN, r, c)
+    Set ld = BuildLabelDict(a, r, c)
 
     For i = 1 To r
-        For j = 1 To c
-            CheckCell wsO, wsN, i, i, j, a(i, j), b(i, j), lg
-        Next j
+        oRow = ShiftedRow(b, i, c, ld, lc)
+        If oRow > 0 Then
+            CompareRow wsO, wsN, a, b, oRow, i, c, lc, lg
+        Else
+            CompareRow wsO, wsN, a, b, i, i, c, 0, lg
+        End If
     Next i
 End Sub
 
 '---------- キー列で行を対応づけて比較 ----------
 Private Sub CompareByKey(wsO As Worksheet, wsN As Worksheet, ByVal k As Long, lg As Collection)
-    Dim rO As Long, rN As Long, c As Long, i As Long, j As Long, oi As Long
+    Dim rO As Long, rN As Long, c As Long, i As Long, oi As Long, lc As Long
     Dim a As Variant, b As Variant, v As Variant
     Dim key As String
-    Dim dict As Object, used As Object
+    Dim dict As Object, used As Object, ld As Object
 
     Set dict = CreateObject("Scripting.Dictionary")
     Set used = CreateObject("Scripting.Dictionary")
@@ -137,6 +146,7 @@ Private Sub CompareByKey(wsO As Worksheet, wsN As Worksheet, ByVal k As Long, lg
     c = MaxL(MaxL(MaxL(LastCol(wsO), LastCol(wsN)), k), 2)
     a = GetArr(wsO, rO, c)
     b = GetArr(wsN, rN, c)
+    Set ld = BuildLabelDict(a, rO, c)
 
     For i = 1 To rO
         key = Trim$(ToText(a(i, k)))
@@ -146,33 +156,111 @@ Private Sub CompareByKey(wsO As Worksheet, wsN As Worksheet, ByVal k As Long, lg
     Next i
 
     For i = 1 To rN
-        key = Trim$(ToText(b(i, k)))
-        If key = "" Then
-            ' キーが空の行（見出し・合計行など）は同じ行番号どうしで比較
-            If i <= rO Then
-                For j = 1 To c
-                    CheckCell wsO, wsN, i, i, j, a(i, j), b(i, j), lg
-                Next j
-            ElseIf RowHasData(b, i, c) Then
-                MarkNewRow wsN, i, c, "", lg
-            End If
-        ElseIf dict.Exists(key) Then
-            oi = dict(key)
+        oi = ShiftedRow(b, i, c, ld, lc)
+        If oi > 0 Then
+            ' 区分(Ⅰ/Ⅱ/Ⅲ)で対応する行が見つかった
             used(oi) = True
-            For j = 1 To c
-                CheckCell wsO, wsN, oi, i, j, a(oi, j), b(i, j), lg
-            Next j
+            CompareRow wsO, wsN, a, b, oi, i, c, lc, lg
         Else
-            MarkNewRow wsN, i, c, key, lg
+            key = Trim$(ToText(b(i, k)))
+            If key = "" Then
+                ' キーが空の行（見出し・合計行など）は同じ行番号どうしで比較
+                If i <= rO Then
+                    CompareRow wsO, wsN, a, b, i, i, c, 0, lg
+                ElseIf RowHasData(b, i, c) Then
+                    MarkNewRow wsN, i, c, "", lg
+                End If
+            ElseIf dict.Exists(key) Then
+                oi = dict(key)
+                used(oi) = True
+                CompareRow wsO, wsN, a, b, oi, i, c, 0, lg
+            Else
+                MarkNewRow wsN, i, c, key, lg
+            End If
         End If
     Next i
 
+    ' 使われなかった前年度の行（区分のある行は除く）を「行削除」として記録
     For Each v In dict.Keys
         If Not used.Exists(dict(v)) Then
-            lg.Add Array(wsN.Name, "前年度 " & dict(v) & "行", "キー: " & v, "", "行削除")
+            If LabelCol(a, dict(v), c) = 0 Then
+                lg.Add Array(wsN.Name, "前年度 " & dict(v) & "行", "キー: " & v, "", "行削除")
+            End If
         End If
     Next v
 End Sub
+
+'---------- 1行分の比較 ----------
+' skipCol: 比較しない列（区分のセル）。0なら全列比較
+Private Sub CompareRow(wsO As Worksheet, wsN As Worksheet, a As Variant, b As Variant, _
+                       ByVal oRow As Long, ByVal nRow As Long, ByVal c As Long, _
+                       ByVal skipCol As Long, lg As Collection)
+    Dim j As Long
+    For j = 1 To c
+        If j <> skipCol Then
+            CheckCell wsO, wsN, oRow, nRow, j, a(oRow, j), b(nRow, j), lg
+        End If
+    Next j
+End Sub
+
+'---------- 区分(Ⅰ/Ⅱ/Ⅲ)の処理 ----------
+' 前年度シートの「項目＋区分」→ 行番号 の辞書を作る
+Private Function BuildLabelDict(a As Variant, ByVal r As Long, ByVal c As Long) As Object
+    Dim d As Object, i As Long, lc As Long, k As String
+    Set d = CreateObject("Scripting.Dictionary")
+    For i = 1 To r
+        lc = LabelCol(a, i, c)
+        If lc > 0 Then
+            k = ItemKey(a, i, lc) & vbTab & LabelNo(a(i, lc))
+            If Not d.Exists(k) Then d.Add k, i
+        End If
+    Next i
+    Set BuildLabelDict = d
+End Function
+
+' 今年度の行に区分があれば、比較先の前年度の行番号を返す（なければ0）
+' lc には区分のある列番号が入る
+Private Function ShiftedRow(b As Variant, ByVal i As Long, ByVal c As Long, _
+                            ld As Object, ByRef lc As Long) As Long
+    Dim t As Long, tgt As Long, k As String
+    lc = LabelCol(b, i, c)
+    If lc = 0 Then Exit Function
+    t = LabelNo(b(i, lc))
+    If t < 3 Then tgt = t + 1 Else tgt = 3
+    k = ItemKey(b, i, lc) & vbTab & tgt
+    If ld.Exists(k) Then ShiftedRow = ld(k)
+End Function
+
+' 行の中で最初に見つかった区分セルの列番号（なければ0）
+Private Function LabelCol(arr As Variant, ByVal r As Long, ByVal c As Long) As Long
+    Dim j As Long
+    For j = 1 To c
+        If LabelNo(arr(r, j)) > 0 Then
+            LabelCol = j
+            Exit Function
+        End If
+    Next j
+End Function
+
+' 区分セルより左側のセルをつなげた文字列（＝項目）
+Private Function ItemKey(arr As Variant, ByVal r As Long, ByVal lc As Long) As String
+    Dim j As Long, s As String
+    For j = 1 To lc - 1
+        s = s & Trim$(ToText(arr(r, j))) & vbTab
+    Next j
+    ItemKey = s
+End Function
+
+' Ⅰ→1、Ⅱ→2、Ⅲ→3、それ以外→0
+Private Function LabelNo(v As Variant) As Long
+    Dim s As String
+    s = Trim$(Replace(ToText(v), ChrW(&H3000), ""))
+    Select Case s
+        Case ChrW(&H2160): LabelNo = 1
+        Case ChrW(&H2161): LabelNo = 2
+        Case ChrW(&H2162): LabelNo = 3
+    End Select
+End Function
 
 '---------- 1セルの比較と色付け ----------
 Private Sub CheckCell(wsO As Worksheet, wsN As Worksheet, ByVal oRow As Long, ByVal nRow As Long, _
@@ -326,9 +414,20 @@ Private Function SheetExists(wb As Workbook, ByVal nm As String) As Boolean
 End Function
 
 Private Function MakeOutPath(ByVal p As String) As String
-    Dim dotPos As Long
-    dotPos = InStrRev(p, ".")
-    MakeOutPath = Left$(p, dotPos - 1) & "_差分_" & Format$(Now, "yyyymmdd_hhnnss") & Mid$(p, dotPos)
+    Dim sepPos As Long, dotPos As Long
+    Dim folder As String, fileName As String
+
+    ' 今年度ファイルと同じフォルダ内の「Hikaku」フォルダを出力先にする
+    sepPos = InStrRev(p, "\")
+    folder = Left$(p, sepPos) & "Hikaku"
+    fileName = Mid$(p, sepPos + 1)
+
+    ' なければ作成
+    If Len(Dir(folder, vbDirectory)) = 0 Then MkDir folder
+
+    dotPos = InStrRev(fileName, ".")
+    MakeOutPath = folder & "\" & Left$(fileName, dotPos - 1) & "_差分_" & _
+                  Format$(Now, "yyyymmdd_hhnnss") & Mid$(fileName, dotPos)
 End Function
 
 Private Function ColIndex(ByVal s As String) As Long
