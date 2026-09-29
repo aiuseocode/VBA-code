@@ -1,0 +1,356 @@
+Option Explicit
+
+'==========================================================
+' 前年度と今年度のExcelを「同じ名前のシート」どうしで比較し、
+' 今年度ファイルのコピーに差分の背景色をつけるマクロ
+'
+'   黄色   : 値が変わったセル
+'   緑     : 今年度で新しく値が入ったセル
+'   ピンク : 今年度で値が消えたセル
+'   濃い緑 : (キー列指定時) 今年度で追加された行
+'
+' ・元の2ファイルは変更しません（今年度ファイルの隣に「_差分_日時」付きで保存）
+' ・先頭に「差分一覧」シートを追加します
+'==========================================================
+
+Private Const LOG_SHEET As String = "差分一覧"
+
+Public Sub 前年度と今年度を比較()
+    Dim oldPath As Variant, newPath As Variant, outPath As String
+    Dim keyInput As String, keyIdx As Long
+    Dim wbO As Workbook, wbN As Workbook
+    Dim wsO As Worksheet, wsN As Worksheet, logWs As Worksheet
+    Dim lg As New Collection
+    Dim msg As String
+
+    oldPath = Application.GetOpenFilename("Excelファイル (*.xls*),*.xls*", , "① 前年度のファイルを選択")
+    If VarType(oldPath) = vbBoolean Then Exit Sub
+    newPath = Application.GetOpenFilename("Excelファイル (*.xls*),*.xls*", , "② 今年度のファイルを選択")
+    If VarType(newPath) = vbBoolean Then Exit Sub
+    If StrComp(oldPath, newPath, vbTextCompare) = 0 Then
+        MsgBox "同じファイルが選ばれています。", vbExclamation
+        Exit Sub
+    End If
+
+    keyInput = InputBox("行を対応づけるキー列（例: A）を入力してください。" & vbCrLf & vbCrLf & _
+                        "空欄のままOKなら、同じセル位置どうしで比較します。", "キー列の指定")
+    keyIdx = ColIndex(keyInput)
+    If keyIdx < 0 Then
+        MsgBox "キー列の指定が正しくありません: " & keyInput, vbExclamation
+        Exit Sub
+    End If
+
+    Application.ScreenUpdating = False
+    Application.DisplayAlerts = False
+    Application.EnableEvents = False
+    On Error GoTo Fail
+
+    Set wbO = Workbooks.Open(Filename:=oldPath, UpdateLinks:=0, ReadOnly:=True)
+    Set wbN = Workbooks.Open(Filename:=newPath, UpdateLinks:=0, ReadOnly:=True)
+
+    ' 今年度ファイルを別名で保存し、そのコピーに色をつける
+    outPath = MakeOutPath(CStr(newPath))
+    wbN.SaveAs Filename:=outPath, FileFormat:=wbN.FileFormat
+
+    For Each wsN In wbN.Worksheets
+        Application.StatusBar = "比較中: " & wsN.Name
+        Set wsO = GetWs(wbO, wsN.Name)
+        If wsO Is Nothing Then
+            lg.Add Array(wsN.Name, "", "", "", "今年度のみのシート")
+        Else
+            If wsN.ProtectContents Then
+                On Error Resume Next
+                wsN.Unprotect
+                Err.Clear
+                On Error GoTo Fail
+            End If
+            If wsN.ProtectContents Then
+                lg.Add Array(wsN.Name, "", "", "", "シート保護のためスキップ")
+            ElseIf keyIdx > 0 Then
+                CompareByKey wsO, wsN, keyIdx, lg
+            Else
+                CompareByPosition wsO, wsN, lg
+            End If
+        End If
+    Next wsN
+
+    For Each wsO In wbO.Worksheets
+        If GetWs(wbN, wsO.Name) Is Nothing Then
+            lg.Add Array(wsO.Name, "", "", "", "前年度のみのシート")
+        End If
+    Next wsO
+
+    Set logWs = WriteLog(wbN, lg)
+    wbN.Save
+    wbO.Close SaveChanges:=False
+    Set wbO = Nothing
+
+    Application.StatusBar = False
+    Application.EnableEvents = True
+    Application.DisplayAlerts = True
+    Application.ScreenUpdating = True
+    logWs.Activate
+    MsgBox "完了しました。" & vbCrLf & "記録: " & lg.Count & " 件" & vbCrLf & vbCrLf & _
+           "保存先:" & vbCrLf & outPath, vbInformation
+    Exit Sub
+
+Fail:
+    msg = Err.Description
+    On Error Resume Next
+    If Not wbO Is Nothing Then wbO.Close SaveChanges:=False
+    Application.StatusBar = False
+    Application.EnableEvents = True
+    Application.DisplayAlerts = True
+    Application.ScreenUpdating = True
+    MsgBox "エラーが発生しました:" & vbCrLf & msg, vbCritical
+End Sub
+
+'---------- セル位置どうしで比較 ----------
+Private Sub CompareByPosition(wsO As Worksheet, wsN As Worksheet, lg As Collection)
+    Dim r As Long, c As Long, i As Long, j As Long
+    Dim a As Variant, b As Variant
+
+    r = MaxL(LastRow(wsO), LastRow(wsN))
+    c = MaxL(MaxL(LastCol(wsO), LastCol(wsN)), 2)
+    a = GetArr(wsO, r, c)
+    b = GetArr(wsN, r, c)
+
+    For i = 1 To r
+        For j = 1 To c
+            CheckCell wsO, wsN, i, i, j, a(i, j), b(i, j), lg
+        Next j
+    Next i
+End Sub
+
+'---------- キー列で行を対応づけて比較 ----------
+Private Sub CompareByKey(wsO As Worksheet, wsN As Worksheet, ByVal k As Long, lg As Collection)
+    Dim rO As Long, rN As Long, c As Long, i As Long, j As Long, oi As Long
+    Dim a As Variant, b As Variant, v As Variant
+    Dim key As String
+    Dim dict As Object, used As Object
+
+    Set dict = CreateObject("Scripting.Dictionary")
+    Set used = CreateObject("Scripting.Dictionary")
+
+    rO = LastRow(wsO)
+    rN = LastRow(wsN)
+    c = MaxL(MaxL(MaxL(LastCol(wsO), LastCol(wsN)), k), 2)
+    a = GetArr(wsO, rO, c)
+    b = GetArr(wsN, rN, c)
+
+    For i = 1 To rO
+        key = Trim$(ToText(a(i, k)))
+        If key <> "" Then
+            If Not dict.Exists(key) Then dict.Add key, i
+        End If
+    Next i
+
+    For i = 1 To rN
+        key = Trim$(ToText(b(i, k)))
+        If key = "" Then
+            ' キーが空の行（見出し・合計行など）は同じ行番号どうしで比較
+            If i <= rO Then
+                For j = 1 To c
+                    CheckCell wsO, wsN, i, i, j, a(i, j), b(i, j), lg
+                Next j
+            ElseIf RowHasData(b, i, c) Then
+                MarkNewRow wsN, i, c, "", lg
+            End If
+        ElseIf dict.Exists(key) Then
+            oi = dict(key)
+            used(oi) = True
+            For j = 1 To c
+                CheckCell wsO, wsN, oi, i, j, a(oi, j), b(i, j), lg
+            Next j
+        Else
+            MarkNewRow wsN, i, c, key, lg
+        End If
+    Next i
+
+    For Each v In dict.Keys
+        If Not used.Exists(dict(v)) Then
+            lg.Add Array(wsN.Name, "前年度 " & dict(v) & "行", "キー: " & v, "", "行削除")
+        End If
+    Next v
+End Sub
+
+'---------- 1セルの比較と色付け ----------
+Private Sub CheckCell(wsO As Worksheet, wsN As Worksheet, ByVal oRow As Long, ByVal nRow As Long, _
+                      ByVal col As Long, va As Variant, vb As Variant, lg As Collection)
+    Dim ta As String, tb As String, kind As String, pos As String
+    Dim clr As Long
+
+    ta = ToText(va)
+    tb = ToText(vb)
+    If ta = tb Then Exit Sub
+
+    If ta = "" Then
+        kind = "追加": clr = RGB(198, 239, 206)
+    ElseIf tb = "" Then
+        kind = "削除": clr = RGB(255, 199, 206)
+    Else
+        kind = "変更": clr = RGB(255, 235, 156)
+    End If
+
+    wsN.Cells(nRow, col).Interior.Color = clr
+
+    pos = wsN.Cells(nRow, col).Address(False, False)
+    If oRow <> nRow Then pos = pos & "（前年度 " & wsO.Cells(oRow, col).Address(False, False) & "）"
+    lg.Add Array(wsN.Name, pos, DispText(wsO.Cells(oRow, col)), DispText(wsN.Cells(nRow, col)), kind)
+End Sub
+
+Private Sub MarkNewRow(wsN As Worksheet, ByVal r As Long, ByVal c As Long, ByVal key As String, lg As Collection)
+    wsN.Range(wsN.Cells(r, 1), wsN.Cells(r, c)).Interior.Color = RGB(169, 208, 142)
+    If key = "" Then
+        lg.Add Array(wsN.Name, r & "行", "", "", "行追加")
+    Else
+        lg.Add Array(wsN.Name, r & "行", "", "キー: " & key, "行追加")
+    End If
+End Sub
+
+'---------- 差分一覧シート ----------
+Private Function WriteLog(wb As Workbook, lg As Collection) As Worksheet
+    Dim ws As Worksheet, nm As String, n As Long, i As Long, j As Long
+    Dim arr() As Variant, rec As Variant
+
+    nm = LOG_SHEET
+    n = 1
+    Do While SheetExists(wb, nm)
+        n = n + 1
+        nm = LOG_SHEET & n
+    Loop
+
+    Set ws = wb.Worksheets.Add(Before:=wb.Sheets(1))
+    ws.Name = nm
+    ws.Range("A:E").NumberFormat = "@"
+    ws.Range("A1:E1").Value = Array("シート", "セル", "前年度", "今年度", "種別")
+    ws.Range("A1:E1").Font.Bold = True
+
+    If lg.Count > 0 Then
+        ReDim arr(1 To lg.Count, 1 To 5)
+        i = 0
+        For Each rec In lg
+            i = i + 1
+            For j = 0 To 4
+                arr(i, j + 1) = rec(j)
+            Next j
+        Next rec
+        ws.Range("A2").Resize(lg.Count, 5).Value = arr
+        ws.Range("A1").Resize(lg.Count + 1, 5).AutoFilter
+    Else
+        ws.Range("A2").Value = "差分はありませんでした"
+    End If
+
+    ws.Range("G1").Value = "凡例"
+    ws.Range("G1").Font.Bold = True
+    ws.Range("G2").Value = "変更": ws.Range("G2").Interior.Color = RGB(255, 235, 156)
+    ws.Range("G3").Value = "追加": ws.Range("G3").Interior.Color = RGB(198, 239, 206)
+    ws.Range("G4").Value = "削除": ws.Range("G4").Interior.Color = RGB(255, 199, 206)
+    ws.Range("G5").Value = "行追加": ws.Range("G5").Interior.Color = RGB(169, 208, 142)
+
+    ws.Columns("A:G").AutoFit
+    For j = 1 To 5
+        If ws.Columns(j).ColumnWidth > 50 Then ws.Columns(j).ColumnWidth = 50
+    Next j
+
+    Set WriteLog = ws
+End Function
+
+'---------- 補助 ----------
+Private Function ToText(v As Variant) As String
+    If IsError(v) Then
+        ToText = "#ERR:" & CStr(v)
+    ElseIf IsEmpty(v) Then
+        ToText = ""
+    Else
+        ToText = CStr(v)
+    End If
+End Function
+
+Private Function DispText(rg As Range) As String
+    Dim v As Variant
+    v = rg.Value
+    If IsError(v) Then
+        DispText = rg.Text
+    Else
+        DispText = CStr(v)
+    End If
+End Function
+
+Private Function RowHasData(arr As Variant, ByVal r As Long, ByVal c As Long) As Boolean
+    Dim j As Long
+    For j = 1 To c
+        If ToText(arr(r, j)) <> "" Then
+            RowHasData = True
+            Exit Function
+        End If
+    Next j
+End Function
+
+Private Function GetArr(ws As Worksheet, ByVal r As Long, ByVal c As Long) As Variant
+    GetArr = ws.Range(ws.Cells(1, 1), ws.Cells(r, c)).Value2
+End Function
+
+Private Function LastRow(ws As Worksheet) As Long
+    Dim f As Range
+    Set f = ws.Cells.Find(What:="*", After:=ws.Cells(1, 1), LookIn:=xlFormulas, LookAt:=xlPart, _
+                          SearchOrder:=xlByRows, SearchDirection:=xlPrevious, MatchCase:=False)
+    If f Is Nothing Then LastRow = 1 Else LastRow = f.Row
+End Function
+
+Private Function LastCol(ws As Worksheet) As Long
+    Dim f As Range
+    Set f = ws.Cells.Find(What:="*", After:=ws.Cells(1, 1), LookIn:=xlFormulas, LookAt:=xlPart, _
+                          SearchOrder:=xlByColumns, SearchDirection:=xlPrevious, MatchCase:=False)
+    If f Is Nothing Then LastCol = 1 Else LastCol = f.Column
+End Function
+
+Private Function GetWs(wb As Workbook, ByVal nm As String) As Worksheet
+    Dim ws As Worksheet
+    For Each ws In wb.Worksheets
+        If StrComp(ws.Name, nm, vbTextCompare) = 0 Then
+            Set GetWs = ws
+            Exit Function
+        End If
+    Next ws
+End Function
+
+Private Function SheetExists(wb As Workbook, ByVal nm As String) As Boolean
+    Dim s As Object
+    For Each s In wb.Sheets
+        If StrComp(s.Name, nm, vbTextCompare) = 0 Then
+            SheetExists = True
+            Exit Function
+        End If
+    Next s
+End Function
+
+Private Function MakeOutPath(ByVal p As String) As String
+    Dim dotPos As Long
+    dotPos = InStrRev(p, ".")
+    MakeOutPath = Left$(p, dotPos - 1) & "_差分_" & Format$(Now, "yyyymmdd_hhnnss") & Mid$(p, dotPos)
+End Function
+
+Private Function ColIndex(ByVal s As String) As Long
+    Dim i As Long, ch As Long, r As Long
+    s = UCase$(Trim$(StrConv(s, vbNarrow)))
+    If s = "" Then Exit Function
+    If IsNumeric(s) Then
+        r = CLng(s)
+    Else
+        For i = 1 To Len(s)
+            ch = Asc(Mid$(s, i, 1)) - 64
+            If ch < 1 Or ch > 26 Then
+                ColIndex = -1
+                Exit Function
+            End If
+            r = r * 26 + ch
+        Next i
+    End If
+    If r < 1 Or r > 16384 Then r = -1
+    ColIndex = r
+End Function
+
+Private Function MaxL(ByVal x As Long, ByVal y As Long) As Long
+    If x > y Then MaxL = x Else MaxL = y
+End Function
