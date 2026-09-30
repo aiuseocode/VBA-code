@@ -9,9 +9,11 @@ Option Explicit
 '   ピンク : 今年度で値が消えたセル
 '   濃い緑 : (キー列指定時) 今年度で追加された行
 '
-' ・行の中にⅠ/Ⅱ/Ⅲのセル（区分）がある場合、比較先の行をずらす
+' ・行の中にⅠ/Ⅱ/Ⅲのセル（区分）がある場合、区分の列から右側だけ比較先の行をずらす
 '     今年度Ⅰ・Ⅱ → 前年度の1つ下の行、今年度Ⅲ → 前年度の同じ行
+'   区分より左側のセルは通常どおり同じ行と比較
 ' ・区分のセルどうしが対応（Ⅰ⇔Ⅱ、Ⅱ⇔Ⅲ、Ⅲ⇔Ⅲ）していれば色をつけない
+' ・区分とみなすのは中身が「Ⅰ」「Ⅱ」「Ⅲ」だけのセル（①や1などは対象外）
 ' ・元の2ファイルは変更しません（今年度ファイルと同じフォルダの「Hikaku」に保存）
 ' ・先頭に「差分一覧」シートを追加します
 '==========================================================
@@ -110,7 +112,7 @@ End Sub
 
 '---------- セル位置どうしで比較 ----------
 Private Sub CompareByPosition(wsO As Worksheet, wsN As Worksheet, lg As Collection)
-    Dim r As Long, c As Long, i As Long, oRow As Long, lc As Long
+    Dim r As Long, c As Long, i As Long, sRow As Long, lc As Long
     Dim a As Variant, b As Variant
 
     r = MaxL(LastRow(wsO), LastRow(wsN))
@@ -119,12 +121,8 @@ Private Sub CompareByPosition(wsO As Worksheet, wsN As Worksheet, lg As Collecti
     b = GetArr(wsN, r, c)
 
     For i = 1 To r
-        oRow = ShiftedRow(b, i, c, r, lc)
-        If oRow > 0 Then
-            CompareRow wsO, wsN, a, b, oRow, i, c, lg
-        Else
-            CompareRow wsO, wsN, a, b, i, i, c, lg
-        End If
+        sRow = ShiftedRow(b, i, c, r, lc)
+        CompareRow wsO, wsN, a, b, i, sRow, i, c, lc, lg
     Next i
 End Sub
 
@@ -156,20 +154,21 @@ Private Sub CompareByKey(wsO As Worksheet, wsN As Worksheet, ByVal k As Long, lg
         If oi > 0 Then
             ' 区分(Ⅰ/Ⅱ/Ⅲ)のある行は行番号で対応づける
             used(oi) = True
-            CompareRow wsO, wsN, a, b, oi, i, c, lg
+            used(i) = True
+            CompareRow wsO, wsN, a, b, i, oi, i, c, lc, lg
         Else
             key = Trim$(ToText(b(i, k)))
             If key = "" Then
                 ' キーが空の行（見出し・合計行など）は同じ行番号どうしで比較
                 If i <= rO Then
-                    CompareRow wsO, wsN, a, b, i, i, c, lg
+                    CompareRow wsO, wsN, a, b, i, 0, i, c, 0, lg
                 ElseIf RowHasData(b, i, c) Then
                     MarkNewRow wsN, i, c, "", lg
                 End If
             ElseIf dict.Exists(key) Then
                 oi = dict(key)
                 used(oi) = True
-                CompareRow wsO, wsN, a, b, oi, i, c, lg
+                CompareRow wsO, wsN, a, b, oi, 0, i, c, 0, lg
             Else
                 MarkNewRow wsN, i, c, key, lg
             End If
@@ -187,12 +186,24 @@ Private Sub CompareByKey(wsO As Worksheet, wsN As Worksheet, ByVal k As Long, lg
 End Sub
 
 '---------- 1行分の比較 ----------
+' oRow : 通常の比較先（前年度の行）
+' sRow : 区分の列から右側の比較先（0ならずらさない）
+' lc   : 区分の列（0なら区分なし）
 Private Sub CompareRow(wsO As Worksheet, wsN As Worksheet, a As Variant, b As Variant, _
-                       ByVal oRow As Long, ByVal nRow As Long, ByVal c As Long, lg As Collection)
-    Dim j As Long
+                       ByVal oRow As Long, ByVal sRow As Long, ByVal nRow As Long, _
+                       ByVal c As Long, ByVal lc As Long, lg As Collection)
+    Dim j As Long, o As Long
     For j = 1 To c
-        If Not IsShiftedLabel(a(oRow, j), b(nRow, j)) Then
-            CheckCell wsO, wsN, oRow, nRow, j, a(oRow, j), b(nRow, j), lg
+        o = oRow
+        If sRow > 0 And lc > 0 And j >= lc Then o = sRow
+
+        If j = lc And sRow > 0 Then
+            ' 区分のセル：Ⅰ⇔Ⅱ、Ⅱ⇔Ⅲ、Ⅲ⇔Ⅲ なら色をつけない
+            If Not IsShiftedLabel(a(o, j), b(nRow, j)) Then
+                CheckCell wsO, wsN, o, nRow, j, a(o, j), b(nRow, j), lg
+            End If
+        Else
+            CheckCell wsO, wsN, o, nRow, j, a(o, j), b(nRow, j), lg
         End If
     Next j
 End Sub
@@ -214,7 +225,7 @@ Private Function ShiftedRow(b As Variant, ByVal i As Long, ByVal c As Long, _
     End If
 End Function
 
-' 行の中で最初に見つかった区分セルの列番号（なければ0）
+' 行の中で左から最初に見つかった区分セルの列番号（なければ0）
 Private Function LabelCol(arr As Variant, ByVal r As Long, ByVal c As Long) As Long
     Dim j As Long
     For j = 1 To c
@@ -225,7 +236,7 @@ Private Function LabelCol(arr As Variant, ByVal r As Long, ByVal c As Long) As L
     Next j
 End Function
 
-' Ⅰ→1、Ⅱ→2、Ⅲ→3、それ以外→0
+' Ⅰ→1、Ⅱ→2、Ⅲ→3、それ以外（①、1、I なども含む）→0
 Private Function LabelNo(v As Variant) As Long
     Dim s As String
     s = Trim$(Replace(ToText(v), ChrW(&H3000), ""))
