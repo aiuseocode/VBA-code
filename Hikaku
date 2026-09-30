@@ -13,6 +13,7 @@ Option Explicit
 '   同じ項目の前年度の行と比較する
 '     今年度Ⅰ → 前年度Ⅱ、今年度Ⅱ → 前年度Ⅲ、今年度Ⅲ → 前年度Ⅲ
 '   前年度に対応する行がなければ通常の比較をする
+' ・区分のセルどうしが上の対応になっている場合は色をつけない
 ' ・元の2ファイルは変更しません（今年度ファイルと同じフォルダの「Hikaku」に保存）
 ' ・先頭に「差分一覧」シートを追加します
 '==========================================================
@@ -198,7 +199,9 @@ Private Sub CompareRow(wsO As Worksheet, wsN As Worksheet, a As Variant, b As Va
     Dim j As Long
     For j = 1 To c
         If j <> skipCol Then
-            CheckCell wsO, wsN, oRow, nRow, j, a(oRow, j), b(nRow, j), lg
+            If Not IsShiftedLabel(a(oRow, j), b(nRow, j)) Then
+                CheckCell wsO, wsN, oRow, nRow, j, a(oRow, j), b(nRow, j), lg
+            End If
         End If
     Next j
 End Sub
@@ -260,6 +263,19 @@ Private Function LabelNo(v As Variant) As Long
         Case ChrW(&H2161): LabelNo = 2
         Case ChrW(&H2162): LabelNo = 3
     End Select
+End Function
+
+' 今年度と前年度の区分が「ずらした対応」（Ⅰ⇔Ⅱ、Ⅱ⇔Ⅲ、Ⅲ⇔Ⅲ）なら True
+Private Function IsShiftedLabel(va As Variant, vb As Variant) As Boolean
+    Dim tO As Long, tN As Long
+    tN = LabelNo(vb)
+    If tN = 0 Then Exit Function
+    tO = LabelNo(va)
+    If tN < 3 Then
+        IsShiftedLabel = (tO = tN + 1)
+    Else
+        IsShiftedLabel = (tO = 3)
+    End If
 End Function
 
 '---------- 1セルの比較と色付け ----------
