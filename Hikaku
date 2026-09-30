@@ -4,18 +4,21 @@ Option Explicit
 ' 前年度と今年度のExcelを「同じ名前のシート」どうしで比較し、
 ' 今年度ファイルのコピーに差分の背景色をつけるマクロ
 '
-'   黄色   : 値が変わったセル
-'   緑     : 今年度で新しく値が入ったセル
-'   ピンク : 今年度で値が消えたセル
-'   濃い緑 : (キー列指定時) 今年度で追加された行
+'   黄色     : 値が変わったセル
+'   緑       : 今年度で新しく値が入ったセル
+'   ピンク   : 今年度で値が消えたセル
+'   濃い緑   : (キー列指定時) 今年度で追加された行
+'   薄い赤   : 差分ファイルを開いたあとに手で修正したセル
 '
 ' ・行の中にⅠ/Ⅱ/Ⅲのセル（区分）がある場合、区分の列から右側だけ比較先の行をずらす
 '     今年度Ⅰ・Ⅱ → 前年度の1つ下の行、今年度Ⅲ → 前年度の同じ行
 '   区分より左側のセルは通常どおり同じ行と比較
 ' ・区分のセルどうしが対応（Ⅰ⇔Ⅱ、Ⅱ⇔Ⅲ、Ⅲ⇔Ⅲ）していれば色をつけない
 ' ・区分とみなすのは中身が「Ⅰ」「Ⅱ」「Ⅲ」だけのセル（①や1などは対象外）
-' ・元の2ファイルは変更しません（今年度ファイルと同じフォルダの「Hikaku」に保存）
+' ・元の2ファイルは変更しません（今年度ファイルと同じフォルダの「Hikaku」に.xlsmで保存）
 ' ・先頭に「差分一覧」シートを追加します
+' ・出力ファイルに「セルを変更したら色をつける」マクロを埋め込みます
+'   （トラストセンターの「VBA プロジェクト オブジェクト モデルへのアクセスを信頼する」が必要）
 '==========================================================
 
 Private Const LOG_SHEET As String = "差分一覧"
@@ -53,9 +56,9 @@ Public Sub 前年度と今年度を比較()
     Set wbO = Workbooks.Open(Filename:=oldPath, UpdateLinks:=0, ReadOnly:=True)
     Set wbN = Workbooks.Open(Filename:=newPath, UpdateLinks:=0, ReadOnly:=True)
 
-    ' 今年度ファイルを別名で保存し、そのコピーに色をつける
+    ' 今年度ファイルをマクロ有効ブックとして別名で保存し、そのコピーに色をつける
     outPath = MakeOutPath(CStr(newPath))
-    wbN.SaveAs Filename:=outPath, FileFormat:=wbN.FileFormat
+    wbN.SaveAs Filename:=outPath, FileFormat:=52   ' 52 = マクロ有効ブック(.xlsm)
 
     For Each wsN In wbN.Worksheets
         Application.StatusBar = "比較中: " & wsN.Name
@@ -86,6 +89,11 @@ Public Sub 前年度と今年度を比較()
     Next wsO
 
     Set logWs = WriteLog(wbN, lg)
+    msg = ""
+    If Not AddChangeHighlighter(wbN) Then
+        msg = vbCrLf & vbCrLf & "※変更時の色付けマクロは追加できませんでした" & vbCrLf & _
+              "（トラストセンターの設定を確認してください）"
+    End If
     wbN.Save
     wbO.Close SaveChanges:=False
     Set wbO = Nothing
@@ -96,7 +104,7 @@ Public Sub 前年度と今年度を比較()
     Application.ScreenUpdating = True
     logWs.Activate
     MsgBox "完了しました。" & vbCrLf & "記録: " & lg.Count & " 件" & vbCrLf & vbCrLf & _
-           "保存先:" & vbCrLf & outPath, vbInformation
+           "保存先:" & vbCrLf & outPath & msg, vbInformation
     Exit Sub
 
 Fail:
@@ -333,6 +341,7 @@ Private Function WriteLog(wb As Workbook, lg As Collection) As Worksheet
     ws.Range("G3").Value = "追加": ws.Range("G3").Interior.Color = RGB(198, 239, 206)
     ws.Range("G4").Value = "削除": ws.Range("G4").Interior.Color = RGB(255, 199, 206)
     ws.Range("G5").Value = "行追加": ws.Range("G5").Interior.Color = RGB(169, 208, 142)
+    ws.Range("G6").Value = "手修正": ws.Range("G6").Interior.Color = RGB(255, 150, 150)
 
     ws.Columns("A:G").AutoFit
     For j = 1 To 5
@@ -340,6 +349,24 @@ Private Function WriteLog(wb As Workbook, lg As Collection) As Worksheet
     Next j
 
     Set WriteLog = ws
+End Function
+
+'---------- 出力ファイルに色付けマクロを埋め込む ----------
+' セルを変更したら薄い赤にする Workbook_SheetChange を ThisWorkbook に追加
+Private Function AddChangeHighlighter(wb As Workbook) As Boolean
+    Dim code As String, nm As String
+    code = "Private Sub Workbook_SheetChange(ByVal Sh As Object, ByVal Target As Range)" & vbCrLf & _
+           "    If Target.CountLarge > 10000 Then Exit Sub" & vbCrLf & _
+           "    On Error Resume Next" & vbCrLf & _
+           "    Target.Interior.Color = RGB(255, 150, 150)" & vbCrLf & _
+           "End Sub"
+
+    On Error GoTo NG
+    nm = wb.CodeName
+    If nm = "" Then nm = "ThisWorkbook"
+    wb.VBProject.VBComponents(nm).CodeModule.AddFromString code
+    AddChangeHighlighter = True
+NG:
 End Function
 
 '---------- 補助 ----------
@@ -423,9 +450,10 @@ Private Function MakeOutPath(ByVal p As String) As String
     ' なければ作成
     If Len(Dir(folder, vbDirectory)) = 0 Then MkDir folder
 
+    ' マクロ入りで保存するので拡張子は .xlsm
     dotPos = InStrRev(fileName, ".")
     MakeOutPath = folder & "\" & Left$(fileName, dotPos - 1) & "_差分_" & _
-                  Format$(Now, "yyyymmdd_hhnnss") & Mid$(fileName, dotPos)
+                  Format$(Now, "yyyymmdd_hhnnss") & ".xlsm"
 End Function
 
 Private Function ColIndex(ByVal s As String) As Long
