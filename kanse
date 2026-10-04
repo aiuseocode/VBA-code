@@ -1,0 +1,159 @@
+'==========================================================
+' 差分ファイルを完成品にするマクロ
+'  ・選んだフォルダ内の「〇〇_差分_日時.xlsm」をすべて処理
+'  ・「差分一覧」シートを削除
+'  ・比較マクロ／手修正でつけた背景色だけを消す（元からある色はそのまま）
+'  ・ファイル名から「_差分」以降を消し、「完成品」フォルダに .xlsx で保存
+'    （.xlsxで保存するので、埋め込んだ色付けマクロも消えます）
+'  ・差分ファイル自体は変更しません
+'==========================================================
+
+Private Const FIN_OUT_FOLDER As String = "完成品"
+Private Const FIN_LOG_PREFIX As String = "差分一覧"
+
+Public Sub 差分ファイルを完成品にする()
+    Dim folder As String, outDir As String, f As String
+    Dim files As New Collection, v As Variant
+    Dim wb As Workbook
+    Dim okCount As Long, ngList As String
+    Dim secBak As Long
+
+    With Application.FileDialog(msoFileDialogFolderPicker)
+        .Title = "差分ファイルが入っているフォルダを選択"
+        If .Show <> -1 Then Exit Sub
+        folder = .SelectedItems(1)
+    End With
+    If Right$(folder, 1) <> "\" Then folder = folder & "\"
+
+    ' 対象ファイルを先に集める（一時ファイル ~$ は除外）
+    f = Dir(folder & "*_差分*.xls*")
+    Do While f <> ""
+        If Left$(f, 2) <> "~$" Then files.Add f
+        f = Dir()
+    Loop
+    If files.Count = 0 Then
+        MsgBox "「_差分」が付いたファイルが見つかりませんでした。", vbExclamation
+        Exit Sub
+    End If
+
+    outDir = folder & FIN_OUT_FOLDER
+    If Len(Dir(outDir, vbDirectory)) = 0 Then MkDir outDir
+
+    secBak = Application.AutomationSecurity
+    Application.ScreenUpdating = False
+    Application.DisplayAlerts = False
+    Application.EnableEvents = False
+    Application.AutomationSecurity = 3   ' 開くファイルのマクロを無効にする
+    On Error GoTo Fail
+
+    For Each v In files
+        Application.StatusBar = "処理中: " & v
+        Set wb = Nothing
+        On Error Resume Next
+        Set wb = Workbooks.Open(Filename:=folder & v, UpdateLinks:=0, ReadOnly:=True)
+        On Error GoTo Fail
+
+        If wb Is Nothing Then
+            ngList = ngList & vbCrLf & v & "（開けませんでした）"
+        Else
+            If FinishBook(wb, outDir & "\" & FinalName(CStr(v)) & ".xlsx") Then
+                okCount = okCount + 1
+            Else
+                ngList = ngList & vbCrLf & v & "（保存できませんでした）"
+            End If
+            wb.Close SaveChanges:=False
+        End If
+    Next v
+
+Done:
+    Application.AutomationSecurity = secBak
+    Application.StatusBar = False
+    Application.EnableEvents = True
+    Application.DisplayAlerts = True
+    Application.ScreenUpdating = True
+    If ngList = "" Then
+        MsgBox "完了しました。" & vbCrLf & okCount & " 件を保存しました。" & vbCrLf & vbCrLf & _
+               "保存先:" & vbCrLf & outDir, vbInformation
+    Else
+        MsgBox "完了しました（一部失敗）。" & vbCrLf & okCount & " 件を保存しました。" & vbCrLf & _
+               vbCrLf & "失敗:" & ngList & vbCrLf & vbCrLf & "保存先:" & vbCrLf & outDir, vbExclamation
+    End If
+    Exit Sub
+
+Fail:
+    ngList = ngList & vbCrLf & "エラー: " & Err.Description
+    On Error Resume Next
+    If Not wb Is Nothing Then wb.Close SaveChanges:=False
+    Resume Done
+End Sub
+
+' 1ファイル分の仕上げ処理（成功したら True）
+Private Function FinishBook(wb As Workbook, ByVal outPath As String) As Boolean
+    Dim i As Long, ws As Worksheet
+    On Error GoTo NG
+
+    ' 差分一覧シート（差分一覧2 なども）を削除
+    For i = wb.Worksheets.Count To 1 Step -1
+        If Left$(wb.Worksheets(i).Name, Len(FIN_LOG_PREFIX)) = FIN_LOG_PREFIX Then
+            If wb.Sheets.Count > 1 Then wb.Worksheets(i).Delete
+        End If
+    Next i
+
+    ' マクロでつけた色を消す
+    For Each ws In wb.Worksheets
+        ClearMarks ws
+    Next ws
+
+    wb.SaveAs Filename:=outPath, FileFormat:=51   ' 51 = .xlsx
+    FinishBook = True
+NG:
+End Function
+
+' シート内の「マクロでつけた色」のセルだけ塗りつぶしなしにする
+Private Sub ClearMarks(ws As Worksheet)
+    Dim rw As Range, cl As Range, c As Variant
+
+    If ws.ProtectContents Then
+        On Error Resume Next
+        ws.Unprotect
+        On Error GoTo 0
+        If ws.ProtectContents Then Exit Sub
+    End If
+
+    For Each rw In ws.UsedRange.Rows
+        c = rw.Interior.Color
+        If IsNull(c) Then
+            ' 行の中で色が混在 → セルごとに確認
+            For Each cl In rw.Cells
+                If IsMarkColor(cl.Interior.Color) Then cl.Interior.Pattern = xlNone
+            Next cl
+        ElseIf IsMarkColor(c) Then
+            rw.Interior.Pattern = xlNone
+        End If
+    Next rw
+End Sub
+
+' 比較マクロ・手修正で使っている色なら True
+Private Function IsMarkColor(ByVal c As Variant) As Boolean
+    If IsNull(c) Then Exit Function
+    Select Case CLng(c)
+        Case RGB(255, 235, 156), _
+             RGB(198, 239, 206), _
+             RGB(255, 199, 206), _
+             RGB(169, 208, 142), _
+             RGB(255, 150, 150), _
+             RGB(252, 213, 180)
+            IsMarkColor = True
+    End Select
+End Function
+
+' 「〇〇_差分_日時.xlsm」→「〇〇」
+Private Function FinalName(ByVal f As String) As String
+    Dim p As Long
+    p = InStrRev(f, "_差分")
+    If p > 0 Then
+        FinalName = Left$(f, p - 1)
+    Else
+        FinalName = Left$(f, InStrRev(f, ".") - 1)
+    End If
+End Function
