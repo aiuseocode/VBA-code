@@ -2,7 +2,7 @@
 ' 差分ファイルを完成品にするマクロ
 '  ・選んだフォルダ内の「〇〇_差分_日時.xlsm」をすべて処理
 '  ・「差分一覧」シートを削除
-'  ・比較マクロ／手修正でつけた背景色だけを消す（元からある色はそのまま）
+'  ・全シートのセルの背景色をすべて消す
 '  ・ファイル名から「_差分」以降を消し、「完成品」フォルダに .xlsx で保存
 '    （.xlsxで保存するので、埋め込んだ色付けマクロも消えます）
 '  ・差分ファイル自体は変更しません
@@ -62,6 +62,7 @@ Public Sub 差分ファイルを完成品にする()
                 ngList = ngList & vbCrLf & v & "（保存できませんでした）"
             End If
             wb.Close SaveChanges:=False
+            Set wb = Nothing
         End If
     Next v
 
@@ -99,9 +100,9 @@ Private Function FinishBook(wb As Workbook, ByVal outPath As String) As Boolean
         End If
     Next i
 
-    ' マクロでつけた色を消す
+    ' 背景色をすべて消す
     For Each ws In wb.Worksheets
-        ClearMarks ws
+        ClearFills ws
     Next ws
 
     wb.SaveAs Filename:=outPath, FileFormat:=51   ' 51 = .xlsx
@@ -109,43 +110,16 @@ Private Function FinishBook(wb As Workbook, ByVal outPath As String) As Boolean
 NG:
 End Function
 
-' シート内の「マクロでつけた色」のセルだけ塗りつぶしなしにする
-Private Sub ClearMarks(ws As Worksheet)
-    Dim rw As Range, cl As Range, c As Variant
-
+' シート全体の塗りつぶしを「なし」にする
+Private Sub ClearFills(ws As Worksheet)
     If ws.ProtectContents Then
         On Error Resume Next
         ws.Unprotect
         On Error GoTo 0
         If ws.ProtectContents Then Exit Sub
     End If
-
-    For Each rw In ws.UsedRange.Rows
-        c = rw.Interior.Color
-        If IsNull(c) Then
-            ' 行の中で色が混在 → セルごとに確認
-            For Each cl In rw.Cells
-                If IsMarkColor(cl.Interior.Color) Then cl.Interior.Pattern = xlNone
-            Next cl
-        ElseIf IsMarkColor(c) Then
-            rw.Interior.Pattern = xlNone
-        End If
-    Next rw
+    ws.Cells.Interior.ColorIndex = xlNone
 End Sub
-
-' 比較マクロ・手修正で使っている色なら True
-Private Function IsMarkColor(ByVal c As Variant) As Boolean
-    If IsNull(c) Then Exit Function
-    Select Case CLng(c)
-        Case RGB(255, 235, 156), _
-             RGB(198, 239, 206), _
-             RGB(255, 199, 206), _
-             RGB(169, 208, 142), _
-             RGB(255, 150, 150), _
-             RGB(252, 213, 180)
-            IsMarkColor = True
-    End Select
-End Function
 
 ' 「〇〇_差分_日時.xlsm」→「〇〇」
 Private Function FinalName(ByVal f As String) As String
