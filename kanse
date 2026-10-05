@@ -1,24 +1,13 @@
-'==========================================================
-' 差分ファイルを完成品にするマクロ
-'  ・選んだフォルダ内の「〇〇_差分_日時.xlsm」をすべて処理
-'  ・「差分一覧」シートを削除
-'  ・全シートのセルの背景色をすべて消す
-'  ・ファイル名から「_差分」以降を消し、「完成品」フォルダに .xlsx で保存
-'    （.xlsxで保存するので、埋め込んだ色付けマクロも消えます）
-'  ・差分ファイル自体は変更しません
-'==========================================================
-
-Private Const FIN_OUT_FOLDER As String = "完成品"
-Private Const FIN_LOG_PREFIX As String = "差分一覧"
-Private Const FIN_PASSWORD As String = ""   ' シート保護のパスワード（分かれば入れる）
-
-Public Sub 差分ファイルを完成品にする()
-    Dim folder As String, outDir As String, f As String
+' フォルダ内の差分ファイルをまとめて完成品として保存する（色はそのまま）
+'  1. 「差分一覧」シートを削除
+'  2. 各シートをA1選択・左上表示にそろえる
+'  3. ファイル名から「_差分」以降を消し、「完成品」フォルダに .xlsx で保存
+'  ※差分ファイル自体は変更しません。同名の完成品は上書きします
+Public Sub フォルダ内の差分ファイルを完成品として保存()
+    Dim folder As String, outDir As String, f As String, p As Long
     Dim files As New Collection, v As Variant
     Dim wb As Workbook
-    Dim okCount As Long, ngList As String, skipList As String
-    Dim msgText As String
-    Dim secBak As Long
+    Dim okCount As Long, ngList As String
 
     With Application.FileDialog(msoFileDialogFolderPicker)
         .Title = "差分ファイルが入っているフォルダを選択"
@@ -37,108 +26,84 @@ Public Sub 差分ファイルを完成品にする()
         MsgBox "「_差分」が付いたファイルが見つかりませんでした。", vbExclamation
         Exit Sub
     End If
+    If MsgBox(files.Count & " 件のファイルを完成品として保存します。" & vbCrLf & _
+              "（同じ名前の完成品があれば上書きします）", vbOKCancel + vbQuestion) <> vbOK Then Exit Sub
 
-    outDir = folder & FIN_OUT_FOLDER
+    outDir = folder & "完成品"
     If Len(Dir(outDir, vbDirectory)) = 0 Then MkDir outDir
 
-    secBak = Application.AutomationSecurity
     Application.ScreenUpdating = False
     Application.DisplayAlerts = False
-    Application.EnableEvents = False
-    Application.AutomationSecurity = 3   ' 開くファイルのマクロを無効にする
-    On Error GoTo Fail
+    Application.EnableEvents = False   ' 埋め込んだ色付けマクロを動かさない
 
     For Each v In files
-        Application.StatusBar = "処理中: " & v & "（開いています）"
+        Application.StatusBar = "処理中: " & v
         Set wb = Nothing
         On Error Resume Next
         Set wb = Workbooks.Open(Filename:=folder & v, UpdateLinks:=0, ReadOnly:=True)
-        On Error GoTo Fail
+        On Error GoTo 0
 
         If wb Is Nothing Then
             ngList = ngList & vbCrLf & v & "（開けませんでした）"
         Else
-            If FinishBook(wb, outDir & "\" & FinalName(CStr(v)) & ".xlsx", CStr(v), skipList) Then
+            p = InStrRev(v, "_差分")
+            If BatchFinishBook(wb, outDir & "\" & Left$(v, p - 1) & ".xlsx") Then
                 okCount = okCount + 1
             Else
-                ngList = ngList & vbCrLf & v & "（保存できませんでした）"
+                ngList = ngList & vbCrLf & v & "（処理できませんでした）"
             End If
             wb.Close SaveChanges:=False
-            Set wb = Nothing
         End If
     Next v
 
-Done:
-    Application.AutomationSecurity = secBak
     Application.StatusBar = False
     Application.EnableEvents = True
     Application.DisplayAlerts = True
     Application.ScreenUpdating = True
 
-    msgText = "完了しました。" & vbCrLf & okCount & " 件を保存しました。"
-    If ngList <> "" Then msgText = msgText & vbCrLf & vbCrLf & "失敗:" & ngList
-    If skipList <> "" Then msgText = msgText & vbCrLf & vbCrLf & "保護のため色を消せなかったシート:" & skipList
-    MsgBox msgText & vbCrLf & vbCrLf & "保存先:" & vbCrLf & outDir, _
-           IIf(ngList = "" And skipList = "", vbInformation, vbExclamation)
-    Exit Sub
-
-Fail:
-    ngList = ngList & vbCrLf & "エラー: " & Err.Description
-    On Error Resume Next
-    If Not wb Is Nothing Then wb.Close SaveChanges:=False
-    Resume Done
+    If ngList = "" Then
+        MsgBox "完了しました。" & vbCrLf & okCount & " 件を保存しました。" & vbCrLf & vbCrLf & _
+               "保存先:" & vbCrLf & outDir, vbInformation
+    Else
+        MsgBox "完了しました（一部失敗）。" & vbCrLf & okCount & " 件を保存しました。" & vbCrLf & _
+               vbCrLf & "失敗:" & ngList & vbCrLf & vbCrLf & "保存先:" & vbCrLf & outDir, vbExclamation
+    End If
 End Sub
 
-' 1ファイル分の仕上げ処理（成功したら True）
-Private Function FinishBook(wb As Workbook, ByVal outPath As String, ByVal fileName As String, _
-                            ByRef skipList As String) As Boolean
-    Dim i As Long, ws As Worksheet
+' 1ファイル分の処理（成功したら True）
+Private Function BatchFinishBook(wb As Workbook, ByVal outPath As String) As Boolean
+    Dim i As Long
     On Error GoTo NG
 
-    ' 差分一覧シート（差分一覧2 なども）を削除
-    Application.StatusBar = "処理中: " & fileName & "（差分一覧を削除）"
+    ' 1. 差分一覧シート（差分一覧2 なども）を削除
     For i = wb.Worksheets.Count To 1 Step -1
-        If Left$(wb.Worksheets(i).Name, Len(FIN_LOG_PREFIX)) = FIN_LOG_PREFIX Then
+        If Left$(wb.Worksheets(i).Name, Len("差分一覧")) = "差分一覧" Then
             If wb.Sheets.Count > 1 Then wb.Worksheets(i).Delete
         End If
     Next i
 
-    ' 背景色をすべて消す（保護を解除できないシートは飛ばす）
-    For Each ws In wb.Worksheets
-        Application.StatusBar = "処理中: " & fileName & " / " & ws.Name & "（色を消しています）"
-        DoEvents
-        If Not ClearFills(ws) Then
-            skipList = skipList & vbCrLf & fileName & " / " & ws.Name
-        End If
-    Next ws
+    ' 2. 各シートをA1選択・左上表示にそろえる
+    BatchResetView wb
 
-    Application.StatusBar = "処理中: " & fileName & "（保存しています）"
+    ' 3. 完成品フォルダに .xlsx で保存
     wb.SaveAs Filename:=outPath, FileFormat:=51   ' 51 = .xlsx
-    FinishBook = True
+    BatchFinishBook = True
 NG:
 End Function
 
-' 使っている範囲の塗りつぶしを「なし」にする（できなければ False）
-Private Function ClearFills(ws As Worksheet) As Boolean
-    If ws.ProtectContents Then
-        ' パスワードを必ず渡す（渡さないと入力画面が出て止まる）
-        On Error Resume Next
-        ws.Unprotect Password:=FIN_PASSWORD
-        Err.Clear
-        On Error GoTo 0
-        If ws.ProtectContents Then Exit Function
-    End If
-    ws.UsedRange.Interior.ColorIndex = xlNone
-    ClearFills = True
-End Function
-
-' 「〇〇_差分_日時.xlsm」→「〇〇」
-Private Function FinalName(ByVal f As String) As String
-    Dim p As Long
-    p = InStrRev(f, "_差分")
-    If p > 0 Then
-        FinalName = Left$(f, p - 1)
-    Else
-        FinalName = Left$(f, InStrRev(f, ".") - 1)
-    End If
-End Function
+' 表示されている全シートをA1選択・左上表示にし、最初のシートを表示する
+Private Sub BatchResetView(wb As Workbook)
+    Dim ws As Worksheet, firstWs As Worksheet
+    On Error Resume Next
+    wb.Activate
+    For Each ws In wb.Worksheets
+        If ws.Visible = xlSheetVisible Then
+            If firstWs Is Nothing Then Set firstWs = ws
+            ws.Activate
+            ws.Range("A1").Select
+            ActiveWindow.ScrollRow = 1
+            ActiveWindow.ScrollColumn = 1
+        End If
+    Next ws
+    If Not firstWs Is Nothing Then firstWs.Activate
+End Sub
