@@ -1,0 +1,90 @@
+'==========================================================
+' フォルダ内のExcelファイルをすべて印刷する
+'  ・ブック全体を印刷
+'  ・縦向き / 拡大縮小 85% / 白黒印刷（背景色は印刷されない）
+'  ・ファイルは保存しない（元の印刷設定は変わらない）
+'==========================================================
+
+Public Sub フォルダ内のファイルをすべて印刷()
+    Dim folder As String, f As String
+    Dim files As New Collection, v As Variant
+    Dim wb As Workbook, ws As Worksheet
+    Dim okCount As Long, ngList As String
+
+    With Application.FileDialog(msoFileDialogFolderPicker)
+        .Title = "印刷したいファイルが入っているフォルダを選択"
+        If .Show <> -1 Then Exit Sub
+        folder = .SelectedItems(1)
+    End With
+    If Right$(folder, 1) <> "\" Then folder = folder & "\"
+
+    ' 対象ファイルを先に集める（一時ファイル ~$ と、このマクロのブック自身は除外）
+    f = Dir(folder & "*.xls*")
+    Do While f <> ""
+        If Left$(f, 2) <> "~$" And StrComp(folder & f, ThisWorkbook.FullName, vbTextCompare) <> 0 Then
+            files.Add f
+        End If
+        f = Dir()
+    Loop
+    If files.Count = 0 Then
+        MsgBox "Excelファイルが見つかりませんでした。", vbExclamation
+        Exit Sub
+    End If
+    If MsgBox(files.Count & " 件のファイルを印刷します。" & vbCrLf & _
+              "（縦・85%・白黒、ブック全体）", vbOKCancel + vbQuestion) <> vbOK Then Exit Sub
+
+    Application.ScreenUpdating = False
+    Application.DisplayAlerts = False
+    Application.EnableEvents = False
+
+    For Each v In files
+        Application.StatusBar = "印刷中: " & v
+        Set wb = Nothing
+        On Error Resume Next
+        Set wb = Workbooks.Open(Filename:=folder & v, UpdateLinks:=0, ReadOnly:=True)
+        On Error GoTo 0
+
+        If wb Is Nothing Then
+            ngList = ngList & vbCrLf & v & "（開けませんでした）"
+        Else
+            On Error GoTo NG
+            For Each ws In wb.Worksheets
+                PrSetup ws
+            Next ws
+            wb.PrintOut                    ' ブック全体を印刷
+            okCount = okCount + 1
+            GoTo NextFile
+NG:
+            ngList = ngList & vbCrLf & v & "（" & Err.Description & "）"
+            Resume NextFile
+NextFile:
+            On Error GoTo 0
+            wb.Close SaveChanges:=False    ' 保存しない
+        End If
+    Next v
+
+    Application.PrintCommunication = True
+    Application.StatusBar = False
+    Application.EnableEvents = True
+    Application.DisplayAlerts = True
+    Application.ScreenUpdating = True
+
+    If ngList = "" Then
+        MsgBox "完了しました。" & vbCrLf & okCount & " 件を印刷しました。", vbInformation
+    Else
+        MsgBox "完了しました（一部失敗）。" & vbCrLf & okCount & " 件を印刷しました。" & _
+               vbCrLf & vbCrLf & "失敗:" & ngList, vbExclamation
+    End If
+End Sub
+
+' 1シート分の印刷設定（縦・85%・白黒）
+Private Sub PrSetup(ws As Worksheet)
+    On Error Resume Next
+    Application.PrintCommunication = False   ' 設定中はプリンターと通信しない（高速化）
+    With ws.PageSetup
+        .Orientation = xlPortrait   ' 縦
+        .Zoom = 85                  ' 拡大縮小 85%
+        .BlackAndWhite = True       ' 白黒印刷（背景色は印刷されない）
+    End With
+    Application.PrintCommunication = True    ' ここで設定がまとめて反映される
+End Sub
