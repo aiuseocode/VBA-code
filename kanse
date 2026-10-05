@@ -10,12 +10,14 @@
 
 Private Const FIN_OUT_FOLDER As String = "完成品"
 Private Const FIN_LOG_PREFIX As String = "差分一覧"
+Private Const FIN_PASSWORD As String = ""   ' シート保護のパスワード（分かれば入れる）
 
 Public Sub 差分ファイルを完成品にする()
     Dim folder As String, outDir As String, f As String
     Dim files As New Collection, v As Variant
     Dim wb As Workbook
-    Dim okCount As Long, ngList As String
+    Dim okCount As Long, ngList As String, skipList As String
+    Dim msgText As String
     Dim secBak As Long
 
     With Application.FileDialog(msoFileDialogFolderPicker)
@@ -47,7 +49,7 @@ Public Sub 差分ファイルを完成品にする()
     On Error GoTo Fail
 
     For Each v In files
-        Application.StatusBar = "処理中: " & v
+        Application.StatusBar = "処理中: " & v & "（開いています）"
         Set wb = Nothing
         On Error Resume Next
         Set wb = Workbooks.Open(Filename:=folder & v, UpdateLinks:=0, ReadOnly:=True)
@@ -56,7 +58,7 @@ Public Sub 差分ファイルを完成品にする()
         If wb Is Nothing Then
             ngList = ngList & vbCrLf & v & "（開けませんでした）"
         Else
-            If FinishBook(wb, outDir & "\" & FinalName(CStr(v)) & ".xlsx") Then
+            If FinishBook(wb, outDir & "\" & FinalName(CStr(v)) & ".xlsx", CStr(v), skipList) Then
                 okCount = okCount + 1
             Else
                 ngList = ngList & vbCrLf & v & "（保存できませんでした）"
@@ -72,13 +74,12 @@ Done:
     Application.EnableEvents = True
     Application.DisplayAlerts = True
     Application.ScreenUpdating = True
-    If ngList = "" Then
-        MsgBox "完了しました。" & vbCrLf & okCount & " 件を保存しました。" & vbCrLf & vbCrLf & _
-               "保存先:" & vbCrLf & outDir, vbInformation
-    Else
-        MsgBox "完了しました（一部失敗）。" & vbCrLf & okCount & " 件を保存しました。" & vbCrLf & _
-               vbCrLf & "失敗:" & ngList & vbCrLf & vbCrLf & "保存先:" & vbCrLf & outDir, vbExclamation
-    End If
+
+    msgText = "完了しました。" & vbCrLf & okCount & " 件を保存しました。"
+    If ngList <> "" Then msgText = msgText & vbCrLf & vbCrLf & "失敗:" & ngList
+    If skipList <> "" Then msgText = msgText & vbCrLf & vbCrLf & "保護のため色を消せなかったシート:" & skipList
+    MsgBox msgText & vbCrLf & vbCrLf & "保存先:" & vbCrLf & outDir, _
+           IIf(ngList = "" And skipList = "", vbInformation, vbExclamation)
     Exit Sub
 
 Fail:
@@ -89,37 +90,47 @@ Fail:
 End Sub
 
 ' 1ファイル分の仕上げ処理（成功したら True）
-Private Function FinishBook(wb As Workbook, ByVal outPath As String) As Boolean
+Private Function FinishBook(wb As Workbook, ByVal outPath As String, ByVal fileName As String, _
+                            ByRef skipList As String) As Boolean
     Dim i As Long, ws As Worksheet
     On Error GoTo NG
 
     ' 差分一覧シート（差分一覧2 なども）を削除
+    Application.StatusBar = "処理中: " & fileName & "（差分一覧を削除）"
     For i = wb.Worksheets.Count To 1 Step -1
         If Left$(wb.Worksheets(i).Name, Len(FIN_LOG_PREFIX)) = FIN_LOG_PREFIX Then
             If wb.Sheets.Count > 1 Then wb.Worksheets(i).Delete
         End If
     Next i
 
-    ' 背景色をすべて消す
+    ' 背景色をすべて消す（保護を解除できないシートは飛ばす）
     For Each ws In wb.Worksheets
-        ClearFills ws
+        Application.StatusBar = "処理中: " & fileName & " / " & ws.Name & "（色を消しています）"
+        DoEvents
+        If Not ClearFills(ws) Then
+            skipList = skipList & vbCrLf & fileName & " / " & ws.Name
+        End If
     Next ws
 
+    Application.StatusBar = "処理中: " & fileName & "（保存しています）"
     wb.SaveAs Filename:=outPath, FileFormat:=51   ' 51 = .xlsx
     FinishBook = True
 NG:
 End Function
 
-' シート全体の塗りつぶしを「なし」にする
-Private Sub ClearFills(ws As Worksheet)
+' 使っている範囲の塗りつぶしを「なし」にする（できなければ False）
+Private Function ClearFills(ws As Worksheet) As Boolean
     If ws.ProtectContents Then
+        ' パスワードを必ず渡す（渡さないと入力画面が出て止まる）
         On Error Resume Next
-        ws.Unprotect
+        ws.Unprotect Password:=FIN_PASSWORD
+        Err.Clear
         On Error GoTo 0
-        If ws.ProtectContents Then Exit Sub
+        If ws.ProtectContents Then Exit Function
     End If
-    ws.Cells.Interior.ColorIndex = xlNone
-End Sub
+    ws.UsedRange.Interior.ColorIndex = xlNone
+    ClearFills = True
+End Function
 
 ' 「〇〇_差分_日時.xlsm」→「〇〇」
 Private Function FinalName(ByVal f As String) As String
